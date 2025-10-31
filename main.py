@@ -114,7 +114,7 @@ class RetryRequest(BaseModel):
     transcriptId: str
 
 class SimpleSummaryResponse(BaseModel):
-    summary: Optional[str] = None
+    text: Optional[str] = None
     error: Optional[str] = None
 
 # --- 5. STT 및 Llama 실행 헬퍼 함수 ---
@@ -398,7 +398,7 @@ async def handle_simple_summary(text: str = Form(...)):
         summary_result = await run_simple_summary(text)
         
         # 2. 요약 결과 반환
-        return SimpleSummaryResponse(summary=summary_result)
+        return SimpleSummaryResponse(text=summary_result)
 
     except Exception as e:
         print(f"오류: /summary 엔드포인트 처리 중 예외 발생: {e}")
