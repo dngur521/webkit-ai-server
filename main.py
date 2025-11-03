@@ -1,4 +1,5 @@
 # main.py
+# --- import ---
 import re
 import os
 import asyncio
@@ -275,7 +276,6 @@ async def run_simple_summary(text_to_summarize: str) -> str:
 async def get_final_report_from_llama(all_partial_summaries: str, start_time_str: str, end_time_str: Optional[str] = None) -> str:
     """
     Llama 모델을 실행하여 '최종 보고서' (Notion 스타일) 생성 (전역 모델 사용)
-    [수정] end_time_str 인자 추가
     """
     global llama_model
     if not llama_model:
@@ -291,7 +291,7 @@ async def get_final_report_from_llama(all_partial_summaries: str, start_time_str
         formatted_start_time = "(시작 시간 오류)"
         formatted_start_hhmmss = "HH:mm:ss"
 
-    # 2. [추가] 회의 종료 시간
+    # 2. 회의 종료 시간
     if not end_time_str:
         end_time_str = datetime.now().isoformat() # fallback
             
@@ -352,7 +352,6 @@ async def get_final_report_from_llama(all_partial_summaries: str, start_time_str
 async def generate_final_summary(meeting_id: str, start_time: str, end_time: Optional[str] = None) -> str:
     """
     저장된 모든 중간 요약 파일을 읽어 '최종 요약' 생성 (전역 Llama 모델 사용)
-    [수정] end_time 인자 추가
     """
     global llama_model
     if not llama_model:
@@ -369,13 +368,12 @@ async def generate_final_summary(meeting_id: str, start_time: str, end_time: Opt
             async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
                 all_summaries.append(await f.read())
         except Exception as e:
-            all_summaries.append("") # [수정] 오류 시 빈 문자열 추가
+            all_summaries.append("") # 오류 시 빈 문자열 추가
 
     all_summaries_text = "\n\n---\n\n".join(all_summaries)
     if not all_summaries_text.strip():
         return "요약할 내용이 없습니다."
 
-    # [수정] end_time을 get_final_report_from_llama로 전달
     return await get_final_report_from_llama(all_summaries_text, start_time, end_time)
 
 # --- 6. API 엔드포인트 ---
@@ -392,12 +390,10 @@ async def handle_simple_summary(text: str = Form(...)):
     
     if not text or not text.strip():
         return SimpleSummaryResponse(error="요약할 'text' 내용이 없습니다.")
-        
+    
+    # 단순 요약 헬퍼 함수 호출 및 요약 결과 반환
     try:
-        # 1. 단순 요약 헬퍼 함수 호출
         summary_result = await run_simple_summary(text)
-        
-        # 2. 요약 결과 반환
         return SimpleSummaryResponse(text=summary_result)
 
     except Exception as e:
