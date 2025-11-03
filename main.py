@@ -304,7 +304,7 @@ async def run_simple_summary(text_to_summarize: str) -> str:
     def create_completion_sync():
         return llama_model.create_completion(
             prompt=final_prompt, 
-            temperature=0.5,
+            temperature=0.3,
             max_tokens=1024, # 요약에 필요한 토큰
             stream=False
         )
