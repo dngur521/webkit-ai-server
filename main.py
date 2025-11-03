@@ -19,11 +19,17 @@ import aiofiles # 비동기 파일 처리
 from dotenv import load_dotenv # .env 파일 로드
 from fastapi import FastAPI, Request, Form, File, UploadFile, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware # @CrossOrigin 대체
-from pydantic import BaseModel # Java의 Record/DTO 대체
+from pydantic import BaseModel, Field # Java의 Record/DTO 대체
 
 # --- 라이브러리 임포트 ---
 from faster_whisper import WhisperModel
 from llama_cpp import Llama
+# ---
+
+# --- [RAG] ChromaDB 및 임베딩 모델 임포트 ---
+import chromadb
+from chromadb.utils import embedding_functions
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 # ---
 
 # --- 2. 설정 및 앱 초기화 ---
@@ -50,20 +56,26 @@ if not LLAMA_MODEL_PATH:
 TEMP_DIR = Path(os.getenv("java.io.tmpdir", os.getcwd())) / "fastapi-temp"
 PARTIAL_SUMMARY_DIR = TEMP_DIR / "partial-summaries"
 
-# --- 3. [핵심] 모델을 전역 변수로 선언하고 startup 시 로드 ---
-
+# --- 3. 모델을 전역 변수로 선언하고 startup 시 로드 ---
 whisper_model: Optional[WhisperModel] = None
 llama_model: Optional[Llama] = None
+CHROMA_DB_PATH = TEMP_DIR / "chroma_db_store"
+
+# --- ChromaDB 관련 전역 변수 ---
+chroma_client: Optional[chromadb.PersistentClient] = None
+sentence_transformer_ef: Optional[embedding_functions.SentenceTransformerEmbeddingFunction] = None
 
 @app.on_event("startup")
 async def on_startup():
-    global whisper_model, llama_model
+    global whisper_model, llama_model, chroma_client, sentence_transformer_ef
     
     # 임시 폴더 생성
     os.makedirs(TEMP_DIR, exist_ok=True)
     os.makedirs(PARTIAL_SUMMARY_DIR, exist_ok=True)
+    os.makedirs(CHROMA_DB_PATH, exist_ok=True)
     print(f"임시 파일 폴더: {TEMP_DIR.resolve()}")
     print(f"중간 요약 저장 폴더: {PARTIAL_SUMMARY_DIR.resolve()}")
+    print(f"ChromaDB 저장 폴더: {CHROMA_DB_PATH.resolve()}")
 
     # 1. Whisper 모델 로드 (서버 시작 시 1회)
     try:
@@ -89,6 +101,17 @@ async def on_startup():
         print("[Llama] 모델 로드 완료.")
     except Exception as e:
         print(f"치명적 오류: Llama 모델 로드 실패: {e}")
+
+    # 3. --- ChromaDB 및 임베딩 모델 로드 ---
+    try:
+        print("[ChromaDB] 임베딩 모델 및 클라이언트 로드 시작...")
+        sentence_transformer_ef = embedding_functions.SentenceTransformerEmbeddingFunction(
+            model_name="intfloat/multilingual-e5-large"
+        )
+        chroma_client = chromadb.PersistentClient(path=str(CHROMA_DB_PATH))
+        print("[ChromaDB] 로드 완료.")
+    except Exception as e:
+        print(f"치명적 오류: ChromaDB 또는 임베딩 모델 로드 실패: {e}")
 
 # VRAM 해제 로직 (서버 종료 시)
 @app.on_event("shutdown")
@@ -117,6 +140,24 @@ class RetryRequest(BaseModel):
 class SimpleSummaryResponse(BaseModel):
     text: Optional[str] = None
     error: Optional[str] = None
+
+# --- RAG용 DTO들 ---
+class IndexRequest(BaseModel):
+    meeting_id: str = Field(..., alias="meetingId")
+    text: str
+
+class IndexResponse(BaseModel):
+    message: str
+    error: Optional[str] = None
+
+class AskRequest(BaseModel):
+    meeting_id: str = Field(..., alias="meetingId")
+    query: str
+
+class AskResponse(BaseModel):
+    answer: Optional[str] = None
+    error: Optional[str] = None
+
 
 # --- 5. STT 및 Llama 실행 헬퍼 함수 ---
 # (모델을 인자로 받지 않고, 전역 변수 whisper_model, llama_model을 사용)
@@ -376,9 +417,59 @@ async def generate_final_summary(meeting_id: str, start_time: str, end_time: Opt
 
     return await get_final_report_from_llama(all_summaries_text, start_time, end_time)
 
-# --- 6. API 엔드포인트 ---
+# --- RAG 질문 헬퍼 함수 ---
+async def run_rag_query(meeting_id: str, query: str) -> str:
+    """RAG 파이프라인을 실행하여 질문에 대한 답변 생성"""
+    global llama_model, chroma_client, sentence_transformer_ef
+    if not llama_model or not chroma_client or not sentence_transformer_ef:
+        raise HTTPException(status_code=503, detail="RAG 모델 구성 요소가 준비되지 않았습니다.")
 
-@app.post("/summary", response_model=SimpleSummaryResponse)
+    # 1. (검색) 해당 meeting_id의 Vector DB 컬렉션 가져오기
+    try:
+        collection = chroma_client.get_collection(
+            name=meeting_id,
+            embedding_function=sentence_transformer_ef
+        )
+    except ValueError: # 컬렉션이 존재하지 않을 때 ChromaDB가 발생시키는 예외
+        raise HTTPException(status_code=404, detail=f"'{meeting_id}'에 대해 색인된 회의록을 찾을 수 없습니다. /rag/index를 먼저 호출하세요.")
+
+    # 2. 질문과 가장 관련 높은 텍스트 조각 n_results개 검색
+    retrieved_results = collection.query(query_texts=[query], n_results=10)
+    retrieved_context = "\n\n---\n\n".join(retrieved_results['documents'][0])
+    print(f"RAG 검색 완료 (MeetingID: {meeting_id}, Query: {query})")
+
+    # 3. (생성) LLM 프롬프트 조립
+    system_prompt = (
+        "당신은 주어진 '회의록'를 바탕으로 사용자의 '질문'에 대해 가장 정확하고 간결하게 답변하는 AI 전문가입니다.\n"
+        "반드시 '회의록'에 있는 내용만을 활용하여 답변을 생성해야 합니다. 자료에 없는 내용은 절대 언급하지 마세요."
+    )
+    user_prompt = (
+        f"### 회의록:\n"
+        f"{retrieved_context}\n\n"
+        f"### 질문:\n"
+        f"{query}\n\n"
+        f"### 답변:\n"
+    )
+    final_prompt = (
+        "/no_think <|im_start|>system\n" + system_prompt + "<|im_end|>\n"
+        "<|im_start|>user\n" + user_prompt + "<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+    print("Llama 모델로 'RAG 답변' 생성 시작...")
+
+    def create_completion_sync():
+        return llama_model.create_completion(
+            prompt=final_prompt, temperature=0.3, max_tokens=1024, stream=False
+        )
+    
+    output = await asyncio.to_thread(create_completion_sync)
+    answer = output['choices'][0]['text']
+    answer = re.sub(r"<think>.*?</think>", "", answer, flags=re.DOTALL).strip()
+    return answer or "답변을 생성하지 못했습니다."
+
+
+# --- 6. API 엔드포인트 ---
+@app.post("/ai/summaries/simple", response_model=SimpleSummaryResponse)
 async def handle_simple_summary(text: str = Form(...)):
     """
     제공된 텍스트를 받아 단순 요약을 반환합니다.
@@ -402,7 +493,7 @@ async def handle_simple_summary(text: str = Form(...)):
         traceback.print_exc()
         return SimpleSummaryResponse(error=f"서버 내부 오류: {e}")
 
-@app.post("/process-audio-chunk", response_model=SttResponse)
+@app.post("/ai/summaries/audio", response_model=SttResponse)
 async def handle_audio_chunk(
     meetingId: str = Form(...),
     startTime: str = Form(...),
@@ -489,8 +580,7 @@ async def handle_audio_chunk(
         traceback.print_exc()
         return SttResponse(error=f"서버 내부 오류: {e}", transcriptId=meetingId if isFinal else None)
 
-
-@app.post("/retry-final-summary", response_model=SttResponse)
+@app.post("/ai/summaries/retry", response_model=SttResponse)
 async def handle_retry(retry_request: RetryRequest):
     """
     저장된 중간 요약 파일들로 '최종 요약' 생성을 재시도
@@ -533,7 +623,120 @@ async def handle_retry(retry_request: RetryRequest):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"최종 요약 재시도 실패: {e}"
         )
+
+# --- [RAG 추가] RAG 엔드포인트들 ---
+@app.post("/ai/rag/index", response_model=IndexResponse)
+async def handle_index_text(request: IndexRequest): # DTO가 (camelCase) JSON을 받음
+    """
+    텍스트를 받아 Vector DB에 저장(색인)합니다.
+    /rag/ask 전에 반드시 호출해야 합니다.
+    """
+    global chroma_client, sentence_transformer_ef
     
+    if not chroma_client or not sentence_transformer_ef:
+        raise HTTPException(status_code=503, detail="RAG 모델 구성 요소가 준비되지 않았습니다.")
+
+    # 2. (색인) ChromaDB 색인 (동기 함수를 별도 스레드에서 실행)
+    def index_db_sync():
+        print(f"RAG 색인 스레드 시작 (MeetingID: {request.meeting_id})")
+        try:
+            collection = chroma_client.get_or_create_collection(
+                name=request.meeting_id,
+                embedding_function=sentence_transformer_ef
+            )
+
+            # --- [핵심 수정] 회의록 포맷에 따라 분할기 선택 ---
+            # raw_text = request.text
+            # text_chunks = []
+
+            
+
+            # # 1. Format 1 감지: "숫자. 주제" 형식 (os_study_week1)
+            # # (re.search()를 사용해 이 패턴이 2번 이상 나타나는지 확인)
+            # if re.search(r'\n\d{1,2}\.\s', raw_text):
+            #     print("포맷 감지: '숫자. 주제' 형식으로 분할합니다.")
+            #     # re.split()을 사용하여 "1.", "2." 같은 숫자+점 패턴 '앞'에서 텍스트를 나눔
+            #     # 이렇게 하면 각 주제(1. 2. 3.)가 통째로 하나의 조각이 됩니다.
+            #     text_chunks = re.split(r'\n(?=\d{1,2}\.\s)', raw_text)
+            #     text_chunks = [chunk.strip() for chunk in text_chunks if chunk.strip()]
+            
+            # # 2. Format 2 감지: '문단(\n\n)' 형식 (nova_launch_review)
+            # # '\n\n' (빈 줄)이 있는지 확인
+            # elif '\n\n' in raw_text:
+            #     print("포맷 감지: '문단(\n\n)' 형식으로 분할합니다.")
+            #     text_splitter = RecursiveCharacterTextSplitter(
+            #         chunk_size=500,    # 글자 단위
+            #         chunk_overlap=50,  # 글자 겹침
+            #         separators=["\n\n", "\n", " ", ""] # 문단을 우선으로 쪼갬
+            #     )
+            #     text_chunks = text_splitter.split_text(raw_text)
+            
+            # # 3. Fallback: 위 두 가지가 아닌 경우 (일반 텍스트)
+            # else:
+            #     print("포맷 감지: Fallback '줄바꿈(\n)' 형식으로 분할합니다.")
+            #     # (이전의 69개 조각을 만들었던 방식이지만, 청크 크기를 줄여서 정확도 향상 시도)
+            #     text_splitter = RecursiveCharacterTextSplitter(
+            #         chunk_size=500, # 1000보다 작게
+            #         chunk_overlap=50,
+            #         separators=["\n", " ", ""] # \n\n가 없으므로 \n부터 시작
+            #     )
+            #     text_chunks = text_splitter.split_text(raw_text)
+            # ----------------------------------------------------------------
+
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=250,    # 글자 단위
+                chunk_overlap=50,  # 글자 겹침
+                
+                # ⬇️ 구분자 우선순위 지정:
+                # 1순위: '숫자. 주제' (os_study_week1 형식)
+                # 2순위: '빈 줄' (nova_launch_review 형식)
+                # 3순위: '일반 줄바꿈' (기타 텍스트)
+                separators=[r'\n(?=\d{1,2}\.\s)', "\n\n", "\n", " ", ""]
+            )
+            
+            text_chunks = text_splitter.split_text(request.text)
+            # --- [수정 끝] ---
+
+            if not text_chunks:
+                return 0 # 청크 없음
+            
+            chunk_ids = [f"{request.meeting_id}_{i}" for i in range(len(text_chunks))]
+            
+            collection.upsert(
+                documents=text_chunks,
+                ids=chunk_ids
+            )
+            print(f"RAG 색인 스레드 완료 (Chunks: {len(text_chunks)})")
+            return len(text_chunks)
+        except Exception as e:
+            print(f"오류: RAG 색인 스레드 처리 중 예외: {e}")
+            return -1 # 오류 플래그
+    
+    # 비동기 이벤트 루프가 차단되지 않도록 to_thread 사용
+    num_chunks = await asyncio.to_thread(index_db_sync)
+    
+    if num_chunks == -1:
+        raise HTTPException(status_code=500, detail="색인 중 서버 내부 오류가 발생했습니다.")
+    if num_chunks == 0:
+        return IndexResponse(message="색인할 텍스트 내용이 없습니다.", error="Empty text")
+
+    return IndexResponse(message=f"'{request.meeting_id}' 텍스트 색인 완료. {num_chunks}개 조각으로 저장됨.")
+
+@app.post("/ai/rag/ask", response_model=AskResponse)
+async def handle_ask_query(request: AskRequest):
+    """
+    질문(query)과 meeting_id를 받아 RAG 답변을 반환합니다.
+    """
+    try:
+        answer = await run_rag_query(request.meeting_id, request.query)
+        return AskResponse(answer=answer)
+    except HTTPException as he:
+        # run_rag_query에서 발생시킨 예외 (e.g., 404, 503)
+        return AskResponse(error=he.detail)
+    except Exception as e:
+        print(f"오류: /rag/ask 처리 중 예외: {e}")
+        return AskResponse(error=f"질문 처리 중 서버 오류: {e}")
+# ---
 
 # --- 7. (선택) uvicorn으로 바로 실행 ---
 if __name__ == "__main__":
