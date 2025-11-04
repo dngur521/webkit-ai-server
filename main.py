@@ -93,7 +93,7 @@ async def on_startup():
         llama_model = Llama(
             model_path=LLAMA_MODEL_PATH,
             n_gpu_layers=30,  # -1 = 가능한 만큼 GPU에 올림
-            n_ctx=4096,
+            n_ctx=10240,
             n_threads=8,
             n_batch=512,
             verbose=True # 시작 시 로그 확인
@@ -305,7 +305,7 @@ async def run_simple_summary(text_to_summarize: str) -> str:
         return llama_model.create_completion(
             prompt=final_prompt, 
             temperature=0.3,
-            max_tokens=1024, # 요약에 필요한 토큰
+            max_tokens=10240, # 요약에 필요한 토큰
             stream=False
         )
     output = await asyncio.to_thread(create_completion_sync)
