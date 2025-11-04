@@ -81,7 +81,7 @@ async def on_startup():
     try:
         print("[Whisper] 모델 로드 시작 (medium, cuda)...")
         # "medium" 모델을 HuggingFace에서 자동 다운로드 및 로드
-        whisper_model = WhisperModel("medium", device="cuda", compute_type="float16")
+        whisper_model = WhisperModel("medium", device="cuda", compute_type="int8")
         print("[Whisper] 모델 로드 완료.")
     except Exception as e:
         print(f"치명적 오류: Whisper 모델 로드 실패: {e}")
@@ -92,7 +92,7 @@ async def on_startup():
         print(f"[Llama] 모델 로드 시작: {LLAMA_MODEL_PATH}")
         llama_model = Llama(
             model_path=LLAMA_MODEL_PATH,
-            n_gpu_layers=30,  # -1 = 가능한 만큼 GPU에 올림
+            n_gpu_layers=33,  # -1 = 가능한 만큼 GPU에 올림
             n_ctx=10240,
             n_threads=8,
             n_batch=512,
@@ -303,7 +303,7 @@ async def run_simple_summary(text_to_summarize: str) -> str:
 
     def create_completion_sync():
         return llama_model.create_completion(
-            prompt=final_prompt, 
+            prompt=final_prompt,
             temperature=0.3,
             max_tokens=10240, # 요약에 필요한 토큰
             stream=False
