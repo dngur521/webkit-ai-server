@@ -73,59 +73,59 @@ async def on_startup():
     os.makedirs(TEMP_DIR, exist_ok=True)
     os.makedirs(PARTIAL_SUMMARY_DIR, exist_ok=True)
     os.makedirs(CHROMA_DB_PATH, exist_ok=True)
-    print(f"임시 파일 폴더: {TEMP_DIR.resolve()}")
-    print(f"중간 요약 저장 폴더: {PARTIAL_SUMMARY_DIR.resolve()}")
-    print(f"ChromaDB 저장 폴더: {CHROMA_DB_PATH.resolve()}")
+    print(f"temp files folder: {TEMP_DIR.resolve()}")
+    print(f"middle summary save folder: {PARTIAL_SUMMARY_DIR.resolve()}")
+    print(f"ChromaDB save folder: {CHROMA_DB_PATH.resolve()}")
 
     # 1. Whisper 모델 로드 (서버 시작 시 1회)
     try:
-        print("[Whisper] 모델 로드 시작 (medium, cuda)...")
+        print("[Whisper] model load starting (medium, cuda)...")
         # "medium" 모델을 HuggingFace에서 자동 다운로드 및 로드
         whisper_model = WhisperModel("medium", device="cuda", compute_type="int8")
-        print("[Whisper] 모델 로드 완료.")
+        print("[Whisper] model loaded successfully.")
     except Exception as e:
-        print(f"치명적 오류: Whisper 모델 로드 실패: {e}")
+        print(f"fatal error: Whisper model load failed: {e}")
         # (모델 다운로드 실패 또는 VRAM 부족 시 여기서 서버가 중지될 수 있음)
 
     # 2. Llama 모델 로드 (서버 시작 시 1회)
     try:
-        print(f"[Llama] 모델 로드 시작: {LLAMA_MODEL_PATH}")
+        print(f"[Llama] model load starting: {LLAMA_MODEL_PATH}")
         llama_model = Llama(
             model_path=LLAMA_MODEL_PATH,
-            n_gpu_layers=33,  # -1 = 가능한 만큼 GPU에 올림
+            n_gpu_layers=30,  # -1 = 가능한 만큼 GPU에 올림
             n_ctx=10240,
             n_threads=8,
             n_batch=512,
             verbose=True # 시작 시 로그 확인
         )
-        print("[Llama] 모델 로드 완료.")
+        print("[Llama] model loaded successfully..")
     except Exception as e:
-        print(f"치명적 오류: Llama 모델 로드 실패: {e}")
+        print(f"fatal error: Llama model load failed: {e}")
 
     # 3. --- ChromaDB 및 임베딩 모델 로드 ---
     try:
-        print("[ChromaDB] 임베딩 모델 및 클라이언트 로드 시작...")
+        print("[ChromaDB] embedding model and client load starting...")
         sentence_transformer_ef = embedding_functions.SentenceTransformerEmbeddingFunction(
             model_name="intfloat/multilingual-e5-large"
         )
         chroma_client = chromadb.PersistentClient(path=str(CHROMA_DB_PATH))
-        print("[ChromaDB] 로드 완료.")
+        print("[ChromaDB] loaded successfully.")
     except Exception as e:
-        print(f"치명적 오류: ChromaDB 또는 임베딩 모델 로드 실패: {e}")
+        print(f"fatal error: ChromaDB or embedding model load failed: {e}")
 
 # VRAM 해제 로직 (서버 종료 시)
 @app.on_event("shutdown")
 async def on_shutdown():
     global whisper_model, llama_model
     try:
-        print("서버 종료... AI 모델 언로드 중...")
+        print("server shutdown... AI model unloading...")
         if whisper_model: del whisper_model
         if llama_model: del llama_model
         gc.collect()
         torch.cuda.empty_cache()
-        print("AI 모델 VRAM 언로드 완료.")
+        print("AI model VRAM unloaded successfully.")
     except Exception as e:
-        print(f"모델 언로드 중 오류: {e}")
+        print(f"error: {e}")
 
 # --- 4. DTO 정의 ---
 class SttResponse(BaseModel):
@@ -299,7 +299,7 @@ async def run_simple_summary(text_to_summarize: str) -> str:
         user_prompt +
         "<|im_end|>\n<|im_start|>assistant\n"
     )
-    print("Llama 모델로 '단순 요약' 생성 시작...")
+    print("Make 'simple summary' started...")
 
     def create_completion_sync():
         return llama_model.create_completion(
@@ -311,7 +311,7 @@ async def run_simple_summary(text_to_summarize: str) -> str:
     output = await asyncio.to_thread(create_completion_sync)
     summary = output['choices'][0]['text']
     summary = re.sub(r"<think>.*?</think>", "", summary, flags=re.DOTALL).strip()
-    print("Llama '단순 요약' 생성 완료.")
+    print("Make 'simple summary' successfully.")
     return summary or "요약 내용을 생성하지 못했습니다."
 
 async def get_final_report_from_llama(all_partial_summaries: str, start_time_str: str, end_time_str: Optional[str] = None) -> str:
@@ -436,7 +436,7 @@ async def run_rag_query(meeting_id: str, query: str) -> str:
     # 2. 질문과 가장 관련 높은 텍스트 조각 n_results개 검색
     retrieved_results = collection.query(query_texts=[query], n_results=10)
     retrieved_context = "\n\n---\n\n".join(retrieved_results['documents'][0])
-    print(f"RAG 검색 완료 (MeetingID: {meeting_id}, Query: {query})")
+    print(f"RAG query successfully. (MeetingID: {meeting_id}, Query: {query})")
 
     # 3. (생성) LLM 프롬프트 조립
     system_prompt = (
@@ -455,7 +455,7 @@ async def run_rag_query(meeting_id: str, query: str) -> str:
         "<|im_start|>user\n" + user_prompt + "<|im_end|>\n"
         "<|im_start|>assistant\n"
     )
-    print("Llama 모델로 'RAG 답변' 생성 시작...")
+    print("Making 'RAG answer' started using Llama model...")
 
     def create_completion_sync():
         return llama_model.create_completion(
@@ -466,7 +466,6 @@ async def run_rag_query(meeting_id: str, query: str) -> str:
     answer = output['choices'][0]['text']
     answer = re.sub(r"<think>.*?</think>", "", answer, flags=re.DOTALL).strip()
     return answer or "답변을 생성하지 못했습니다."
-
 
 # --- 6. API 엔드포인트 ---
 @app.post("/ai/summaries/simple", response_model=SimpleSummaryResponse)
@@ -488,7 +487,7 @@ async def handle_simple_summary(text: str = Form(...)):
         return SimpleSummaryResponse(text=summary_result)
 
     except Exception as e:
-        print(f"오류: /summary 엔드포인트 처리 중 예외 발생: {e}")
+        print(f"Error: Exception on /summary endpoint: {e}")
         import traceback
         traceback.print_exc()
         return SimpleSummaryResponse(error=f"서버 내부 오류: {e}")
@@ -512,7 +511,7 @@ async def handle_audio_chunk(
 
         # STT 결과 없음 처리
         if not full_transcript.strip():
-            print(f"STT 결과가 비어있음 (MeetingID: {meetingId}, isFinal: {isFinal})")
+            print(f"Empty STT results (MeetingID: {meetingId}, isFinal: {isFinal})")
             if isFinal:
                 pass 
             else:
@@ -524,7 +523,7 @@ async def handle_audio_chunk(
             try:
                 partial_summary = await get_summary_from_llama(full_transcript, startTime, chunkStartTime)
             except Exception as e:
-                print(f"오류: 중간 요약 생성 실패 (MeetingID: {meetingId}, isFinal: {isFinal}): {e}")
+                print(f"error: Can't create middle summary. (MeetingID: {meetingId}, isFinal: {isFinal}): {e}")
                 if not isFinal:
                     return SttResponse()
         
@@ -537,18 +536,18 @@ async def handle_audio_chunk(
                 summary_file_path = meeting_dir / part_file_name
                 async with aiofiles.open(summary_file_path, 'w', encoding='utf-8') as f:
                     await f.write(partial_summary)
-                print(f"중간 요약 저장: {summary_file_path}")
+                print(f"middle summary saved: {summary_file_path}")
             except Exception as e:
-                print(f"오류: 중간 요약 저장 실패 (MeetingID: {meetingId}): {e}")
+                print(f"error: Can't create middle summary. (MeetingID: {meetingId}): {e}")
                 if not isFinal:
                     return SttResponse()
-                print("최종 요약 처리 중 중간 요약 저장 실패 발생.")
+                print("Middle summary failed to save at final summary processing.")
         else:
-            print(f"생성된 중간 요약 내용이 없어 파일을 저장하지 않습니다. (MeetingID: {meetingId})")
+            print(f"Don't save the file because content of middle summary is empty. (MeetingID: {meetingId})")
 
         # 4. isFinal 플래그에 따라 분기
         if isFinal:
-            print(f"최종 요약 생성을 시작합니다 (MeetingID: {meetingId})")
+            print(f"Create final summary started (MeetingID: {meetingId})")
             try:
                 # 5. 최종 요약 생성 (전역 모델 사용)
                 final_summary = await generate_final_summary(meetingId, startTime, endTime)
@@ -557,15 +556,15 @@ async def handle_audio_chunk(
                 try:
                     if os.path.exists(meeting_dir):
                         shutil.rmtree(meeting_dir)
-                        print(f"중간 요약 파일 삭제 완료: {meeting_dir}")
+                        print(f"Delete middle summaries: {meeting_dir}")
                 except Exception as e:
-                    print(f"오류: 중간 요약 파일 삭제 중 오류 발생 (MeetingID: {meetingId}): {e}")
+                    print(f"error: Can't delete middle summaries (MeetingID: {meetingId}): {e}")
 
                 # 7. '최종 요약' 반환
                 return SttResponse(text=final_summary)
 
             except Exception as e:
-                print(f"오류: 최종 요약 생성 중 심각한 오류 발생 (MeetingID: {meetingId}): {e}")
+                print(f"Fatal error: at create final summary (MeetingID: {meetingId}): {e}")
                 import traceback
                 traceback.print_exc() # 스택 트레이스 출력
                 return SttResponse(error=f"최종 요약 생성 실패: {e}", transcriptId=meetingId)
@@ -575,7 +574,7 @@ async def handle_audio_chunk(
 
     except Exception as e:
         # 예상치 못한 최상위 예외 처리
-        print(f"오류: handle_audio_chunk 처리 중 알 수 없는 오류 (MeetingID: {meetingId}): {e}")
+        print(f"error: at processing handle_audio_chunk() (MeetingID: {meetingId}): {e}")
         import traceback
         traceback.print_exc()
         return SttResponse(error=f"서버 내부 오류: {e}", transcriptId=meetingId if isFinal else None)
@@ -610,13 +609,13 @@ async def handle_retry(retry_request: RetryRequest):
             shutil.rmtree(meeting_dir)
             print(f"중간 요약 파일 삭제 완료 (재시도): {meeting_dir}")
         except Exception as e:
-            print(f"오류: 중간 요약 파일 삭제 중 오류 발생 (재시도) (MeetingID: {meeting_id}): {e}")
+            print(f"error: at delete middle summary (retrying) (MeetingID: {meeting_id}): {e}")
         
         # 3. 성공 응답
         return SttResponse(text=final_summary)
 
     except Exception as e:
-        print(f"오류: 최종 요약 재시도 중 심각한 오류 발생 (MeetingID: {meeting_id}): {e}")
+        print(f"Fatal error: at retrying final summary (MeetingID: {meeting_id}): {e}")
         import traceback
         traceback.print_exc()
         raise HTTPException(
@@ -638,7 +637,7 @@ async def handle_index_text(request: IndexRequest): # DTO가 (camelCase) JSON을
 
     # 2. (색인) ChromaDB 색인 (동기 함수를 별도 스레드에서 실행)
     def index_db_sync():
-        print(f"RAG 색인 스레드 시작 (MeetingID: {request.meeting_id})")
+        print(f"RAG indexing thread started (MeetingID: {request.meeting_id})")
         try:
             collection = chroma_client.get_or_create_collection(
                 name=request.meeting_id,
@@ -706,10 +705,10 @@ async def handle_index_text(request: IndexRequest): # DTO가 (camelCase) JSON을
                 documents=text_chunks,
                 ids=chunk_ids
             )
-            print(f"RAG 색인 스레드 완료 (Chunks: {len(text_chunks)})")
+            print(f"RAG indexing thread ended. (Chunks: {len(text_chunks)})")
             return len(text_chunks)
         except Exception as e:
-            print(f"오류: RAG 색인 스레드 처리 중 예외: {e}")
+            print(f"error: at RAG indexing thread: {e}")
             return -1 # 오류 플래그
     
     # 비동기 이벤트 루프가 차단되지 않도록 to_thread 사용
@@ -734,7 +733,7 @@ async def handle_ask_query(request: AskRequest):
         # run_rag_query에서 발생시킨 예외 (e.g., 404, 503)
         return AskResponse(error=he.detail)
     except Exception as e:
-        print(f"오류: /rag/ask 처리 중 예외: {e}")
+        print(f"error: at /rag/ask endpoint: {e}")
         return AskResponse(error=f"질문 처리 중 서버 오류: {e}")
 # ---
 
@@ -742,5 +741,5 @@ async def handle_ask_query(request: AskRequest):
 if __name__ == "__main__":
     import uvicorn
     # Python main.py를 직접 실행할 경우 (개발용)
-    print(f"Llama 모델 경로 확인: {LLAMA_MODEL_PATH}")
+    print(f"Llama model path: {LLAMA_MODEL_PATH}")
     uvicorn.run(app, host="0.0.0.0", port=8081, log_level="info")
